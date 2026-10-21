@@ -475,7 +475,10 @@ def build_payload(args: argparse.Namespace) -> Dict[str, Any]:
     )
     context_label = "本輪 Context" if args.no_history else "累積 Context"
     displayed_context_tokens = context_tokens if args.no_history else cumulative_context_tokens
-    if context_limit is not None:
+    context_limit_mismatch = bool(displayed_context_tokens is not None and context_limit is not None and displayed_context_tokens > context_limit)
+    if context_limit_mismatch:
+        context_line = f"📊 {context_label}：{format_k_tokens(displayed_context_tokens)}｜上限待核對"
+    elif context_limit is not None:
         context_line = f"📊 {context_label}：{format_k_tokens(displayed_context_tokens)} / {format_k_tokens(context_limit)}"
     else:
         context_line = f"📊 {context_label}：{format_k_tokens(displayed_context_tokens)} tokens"
@@ -498,6 +501,7 @@ def build_payload(args: argparse.Namespace) -> Dict[str, Any]:
         "observedContextTokens": context_tokens,
         "cumulativeContextTokens": cumulative_context_tokens,
         "contextLimit": context_limit,
+        "contextLimitMismatch": context_limit_mismatch,
         "tokenSource": token_source,
         "statusMeta": status_meta,
         "previous": previous,

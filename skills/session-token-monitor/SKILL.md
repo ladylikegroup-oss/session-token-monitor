@@ -35,6 +35,8 @@ Footer format:
 
 `累積 Context` means the highest trusted runtime Context sample observed since this Session started or since its latest OpenClaw compaction. Lower samples do not make the displayed value go backward. A reset/new Session or a changed compaction count starts a new accumulation segment from the next trusted sample. It is not the sum of every API call and does not double-count repeated prompt tokens.
 
+If that cumulative value exceeds the reported limit, render `📊 累積 Context：<high-water>｜上限待核對`. Preserve the raw limit in JSON diagnostics, but do not present a contradictory ratio as verified capacity or guess a replacement limit.
+
 Do **not** use per-call API usage fields, message `usage.totalTokens`, or ambiguous `sessions.json.totalTokens` as the cumulative context count. If the runtime status is unavailable, show `📊 累積 Context：unknown / <limit>` or `unknown tokens` instead of guessing.
 
 ## Install-Time Agent Hook

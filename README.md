@@ -85,6 +85,11 @@ UTF-8 event payload bytes. They never return dialogue, full metadata,
 credentials, or persisted token totals. Cold/unsupported/incomplete transcript
 byte measurements remain unknown without hiding a known compaction count.
 
+If the cumulative high-water exceeds a reported limit, the footer retains the
+cumulative value but shows `上限待核對` instead of presenting a contradictory
+capacity ratio. Raw limit values remain in JSON for diagnostics; no value is
+silently clamped, summed, or replaced with a guessed model window.
+
 ## Agent hook
 
 The installer adds this marker block to `AGENTS.md` or another always-loaded instruction file:

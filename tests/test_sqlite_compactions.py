@@ -67,6 +67,23 @@ class SQLiteCompactionTests(unittest.TestCase):
         result = footer.build_payload(args)
         self.assertEqual((result['compactions'], result['compactionSource']), (4, 'runtime-status'))
 
+    def test_conflicting_limit_keeps_cumulative_value_without_false_capacity_ratio(self):
+        args = self.args()
+        args.status_text = '📚 Context: 309K/272K'
+        result = footer.build_payload(args)
+        self.assertEqual(result['contextTokens'], 309000)
+        self.assertEqual(result['contextLimit'], 272000)  # Keep raw diagnostic source.
+        self.assertTrue(result['contextLimitMismatch'])
+        self.assertEqual(result['contextLine'], '📊 累積 Context：309K｜上限待核對')
+        args.status_text = '📚 Context: 240K/272K'
+        lower = footer.build_payload(args)
+        self.assertEqual(lower['observedContextTokens'], 240000)
+        self.assertEqual(lower['contextTokens'], 309000)  # Never sum or clamp it.
+        args.status_text = '📚 Context: 240K/475K'
+        resolved = footer.build_payload(args)
+        self.assertFalse(resolved['contextLimitMismatch'])
+        self.assertEqual(resolved['contextLine'], '📊 累積 Context：309K / 475K')
+
     def test_zero_and_missing_count_remain_visible(self):
         for entry in ({'compactionCount': 0}, {}):
             with self.subTest(entry=entry):
