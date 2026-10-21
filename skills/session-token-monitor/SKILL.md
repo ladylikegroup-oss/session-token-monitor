@@ -37,7 +37,7 @@ Footer format:
 
 If that cumulative value exceeds the reported limit, render `📊 累積 Context：<high-water>｜上限待核對`. Preserve the raw limit in JSON diagnostics, but do not present a contradictory ratio as verified capacity or guess a replacement limit.
 
-Do **not** use per-call API usage fields, message `usage.totalTokens`, or ambiguous `sessions.json.totalTokens` as the cumulative context count. If the runtime status is unavailable, show `📊 累積 Context：unknown / <limit>` or `unknown tokens` instead of guessing.
+Do **not** use per-call API usage fields, message `usage.totalTokens`, or ambiguous `sessions.json.totalTokens` as the cumulative context count. If the runtime status is unavailable, show `📊 累積 Context：待回報 / <limit>` or `待回報` instead of guessing.
 
 ## Install-Time Agent Hook
 
@@ -121,7 +121,7 @@ For customer debugging, run with `--audit-log logs/session-token-monitor.jsonl` 
 
 ## Fallback Rules
 
-If the fresh context sample is missing but transcript size is known, still show the transcript line, show `📊 累積 Context：unknown / <limit>` when a limit is known (or `unknown tokens`), and retain the selected session's compaction line. Do not silently reuse stale history as if it were fresh.
+If the fresh context sample is missing but transcript size is known, still show the transcript line, show `📊 累積 Context：待回報 / <limit>` when a limit is known (or `待回報`), and retain the selected session's compaction line. Do not silently reuse stale history as if it were fresh.
 
 If transcript size is missing but runtime status has context tokens, omit the transcript line and show the context line.
 
@@ -137,3 +137,7 @@ If everything fails, output:
 - Never print secrets while reporting session status.
 - Before publishing this skill, scan the package for common secret patterns.
 - Do not include local customer-specific memory, transcripts, or config files.
+
+### Post-compaction pending Context
+
+A fresh `📚 Context: ?/272k` status has a known limit but no usage sample. Parse and retain that limit; render `📊 累積 Context：待回報 / 272K` (or `待回報` if no limit). Never substitute cached pre-compaction high-water or per-call tokens. The next fresh numeric runtime sample resumes the normal cumulative display and applies the compaction reset. This is a display/parser repair, not a change to the model capacity.

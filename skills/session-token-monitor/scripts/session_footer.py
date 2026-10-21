@@ -33,7 +33,7 @@ DEFAULT_SESSIONS_JSON = "~/.openclaw/agents/main/sessions/sessions.json"
 DEFAULT_SESSIONS_DB = "~/.openclaw/agents/main/agent/openclaw-agent.sqlite"
 DEFAULT_HISTORY_JSON = "~/.openclaw/session-token-monitor/history.json"
 
-CONTEXT_RE = re.compile(r"📚\s*Context:\s*([0-9][0-9,]*(?:\.\d+)?)\s*([KkMm])?\s*/\s*([0-9][0-9,]*(?:\.\d+)?)\s*([KkMm])?")
+CONTEXT_RE = re.compile(r"📚\s*Context:\s*([0-9][0-9,]*(?:\.\d+)?|\?|unknown)\s*([KkMm])?\s*/\s*([0-9][0-9,]*(?:\.\d+)?)\s*([KkMm])?")
 MODEL_RE = re.compile(r"🧠\s*Model:\s*([^·\n]+)")
 COMPACTIONS_RE = re.compile(r"🧹\s*Compactions:\s*([0-9][0-9,]*)")
 RUNTIME_RE = re.compile(r"Runtime:\s*([^·\n]+)")
@@ -476,7 +476,10 @@ def build_payload(args: argparse.Namespace) -> Dict[str, Any]:
     context_label = "本輪 Context" if args.no_history else "累積 Context"
     displayed_context_tokens = context_tokens if args.no_history else cumulative_context_tokens
     context_limit_mismatch = bool(displayed_context_tokens is not None and context_limit is not None and displayed_context_tokens > context_limit)
-    if context_limit_mismatch:
+    if displayed_context_tokens is None and not args.no_history:
+        pending_limit = f" / {format_k_tokens(context_limit)}" if context_limit is not None else ""
+        context_line = f"📊 {context_label}：待回報{pending_limit}"
+    elif context_limit_mismatch:
         context_line = f"📊 {context_label}：{format_k_tokens(displayed_context_tokens)}｜上限待核對"
     elif context_limit is not None:
         context_line = f"📊 {context_label}：{format_k_tokens(displayed_context_tokens)} / {format_k_tokens(context_limit)}"
