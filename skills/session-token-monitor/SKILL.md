@@ -1,6 +1,6 @@
 ---
 name: session-token-monitor
-description: Mandatory OpenClaw reply-footer workflow for every user-visible response: monitor cumulative session context and transcript size, append consistent token/transcript footers, preserve source diagnostics, and report short-term/weekly usage when asked about session, token, context, compaction, reset, transcript size, usage quota, or LLM conversation health.
+description: "Mandatory OpenClaw reply-footer workflow for every user-visible response: monitor cumulative session context and transcript size, append consistent token/transcript footers, preserve source diagnostics, and report short-term/weekly usage when asked about session, token, context, compaction, reset, transcript size, usage quota, or LLM conversation health."
 ---
 
 # Session Token Monitor
@@ -89,8 +89,11 @@ Use `scripts/session_footer.py` to generate the transcript/context footer. Impor
 - `--no-history` to disable accumulation and report only `本輪 Context`
 - `--allow-latest` to opt in to fallback by most recent session; avoid this for live reply footers
 - `--sessions-json /path/to/sessions.json` to override the default session index
+- `--sessions-db /path/to/openclaw-agent.sqlite` for an explicit read-only canonical store (mutually exclusive with `--sessions-json`)
 
-The script reads OpenClaw's local session index by default: `~/.openclaw/agents/main/sessions/sessions.json`. By default it refuses to guess the current session; pass an exact selector. It also refuses to infer cumulative context from ambiguous per-call `totalTokens` values.
+When `~/.openclaw/agents/main/agent/openclaw-agent.sqlite` exists, it is authoritative and requires an exact `--session-key`; channel/recipient/latest selectors never scan the database. The helper reads only the current generation session ID, compaction count, and logical transcript-byte aggregates, never persisted Context/usage totals. Connections are read-only and no migrations run. A broken store or absent key never falls back to stale migration JSON. Explicit `--sessions-json` keeps legacy/offline selection available; without a canonical database the default is `~/.openclaw/agents/main/sessions/sessions.json`.
+
+Always keep the compaction footer, including `0 次`. Fresh runtime status wins; otherwise use the exact current generation's `compactionCount`. Missing/null counts follow native status behavior (zero), but malformed values remain `unknown`, not a fabricated zero. Do not sum old generations. Unavailable transcript-byte measurement does not hide a known count.
 
 The helper keeps a small local history at `~/.openclaw/session-token-monitor/history.json` by default. It stores the latest observed sample and the cumulative high-water mark for each exact Session. Ordinary lower runtime samples do not reduce the displayed cumulative value. A new Session ID or a changed OpenClaw compaction count resets the segment to the new trusted sample. The displayed compaction count comes from fresh runtime status when supplied, otherwise from the exactly selected session entry. Only trusted runtime-status or explicit CLI samples update history. History updates are atomic and owner-only (`0600`). Use `--no-history` only when you intentionally want the current sample instead of cumulative tracking.
 

@@ -21,13 +21,16 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_SESSIONS_JSON = "~/.openclaw/agents/main/sessions/sessions.json"
+DEFAULT_SESSIONS_DB = "~/.openclaw/agents/main/agent/openclaw-agent.sqlite"
 DEFAULT_HISTORY_JSON = "~/.openclaw/session-token-monitor/history.json"
 
 CONTEXT_RE = re.compile(r"📚\s*Context:\s*([0-9][0-9,]*(?:\.\d+)?)\s*([KkMm])?\s*/\s*([0-9][0-9,]*(?:\.\d+)?)\s*([KkMm])?")
@@ -84,6 +87,66 @@ def find_session_entry(
         raise KeyError("no session entries with sessionFile found")
     candidates.sort(key=lambda kv: kv[1].get("updatedAt", 0), reverse=True)
     return candidates[0]
+
+
+def read_sqlite_session(path: str, session_key: Optional[str], strict: bool) -> Tuple[str, Dict[str, Any], Optional[int]]:
+    """Read one current generation; never load conversation text or token usage.
+
+    Size is logical UTF-8 event payload bytes, not SQLite/WAL file size. Cold
+    archives or unsupported/incomplete byte metadata remain unknown.
+    """
+    if not session_key:
+        raise ValueError("SQLite requires an exact --session-key; refusing to scan or guess")
+    uri = Path(path).expanduser().resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as db:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("BEGIN")  # Consistent key/generation/size snapshot, read-only.
+        row = db.execute(
+            "SELECT n.current_session_id, "
+            "json_extract(n.entry_json, '$.compactionCount'), "
+            "json_type(n.entry_json, '$.compactionCount') FROM session_nodes AS n "
+            "JOIN session_windows AS w ON w.session_id=n.current_session_id "
+            "AND w.session_key=n.session_key "
+            "WHERE n.session_key=? AND n.entry_valid=1",
+            (session_key,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"session_key not found or unavailable in SQLite: {session_key}")
+        # Extract only the count in SQL: never return full entry_json, tokens,
+        # credential/profile fields, or conversation text to the helper.
+        value, value_type = row[1], row[2]
+        count = 0 if value_type in (None, "null") else (
+            value if value_type == "integer" and value >= 0 else None
+        )
+        entry = {"sessionId": row[0], "compactionCount": count,
+                 "_compactionSource": "sqlite-session-entry",
+                 "_compactionCountUnavailable": count is None}
+        size_bytes = None
+        try:
+            if db.execute("PRAGMA encoding").fetchone()[0] != "UTF-8":
+                raise ValueError("unsupported transcript storage encoding")
+            if db.execute(
+                "SELECT 1 FROM session_transcript_cold_archives WHERE session_id=?",
+                (row[0],),
+            ).fetchone():
+                raise ValueError("transcript is cold-archived; byte measurement unavailable")
+            count, known, total = db.execute(
+                "SELECT COUNT(*), COUNT(payload_bytes), SUM(payload_bytes) FROM ("
+                "SELECT CASE "
+                "WHEN event_json IS NOT NULL AND event_zstd IS NULL "
+                "THEN length(CAST(event_json AS BLOB)) "
+                "WHEN event_json IS NULL AND event_zstd IS NOT NULL "
+                "AND event_utf8_bytes BETWEEN 1 AND 4194304 THEN event_utf8_bytes "
+                "END AS payload_bytes FROM transcript_events WHERE session_id=?)",
+                (row[0],),
+            ).fetchone()
+            if not count or known != count:
+                raise ValueError("transcript byte measurement unavailable or incomplete")
+            size_bytes = total
+        except (sqlite3.DatabaseError, ValueError):
+            if strict:
+                raise
+        return session_key, entry, size_bytes
 
 
 def classify_transcript(size_mb: float) -> str:
@@ -265,7 +328,7 @@ def resolve_context_tokens(args: argparse.Namespace, entry: Dict[str, Any]) -> T
     return context_tokens, context_limit, source, status_meta
 
 
-def resolve_compactions(status_meta: Dict[str, Any], entry: Dict[str, Any]) -> Tuple[int, str]:
+def resolve_compactions(status_meta: Dict[str, Any], entry: Dict[str, Any]) -> Tuple[Optional[int], str]:
     """Return the selected session's compaction count and source.
 
     OpenClaw's native status card reads ``compactionCount`` from the selected
@@ -276,9 +339,11 @@ def resolve_compactions(status_meta: Dict[str, Any], entry: Dict[str, Any]) -> T
     if runtime_value is not None:
         return runtime_value, "runtime-status"
 
+    if entry.get("_compactionCountUnavailable"):
+        return None, "sqlite-session-entry-unavailable"
     session_value = parse_int(entry.get("compactionCount"))
     if session_value is not None:
-        return session_value, "session-index"
+        return session_value, entry.get("_compactionSource", "session-index")
 
     return 0, "session-index-default"
 
@@ -359,31 +424,42 @@ def anomaly_warnings(
 
 
 def build_payload(args: argparse.Namespace) -> Dict[str, Any]:
-    data = load_sessions(args.sessions_json)
-    key, entry = find_session_entry(data, args.session_key, args.to, args.channel_id, args.allow_latest)
-
-    session_file = entry.get("sessionFile")
+    session_file = None
     transcript_line = None
     size_bytes = None
     size_mb = None
     level = None
-
-    if session_file:
-        expanded = os.path.expanduser(str(session_file))
-        try:
-            size_bytes = os.stat(expanded).st_size
-            size_mb = size_bytes / (1024 * 1024)
-            level = classify_transcript(size_mb)
-            transcript_line = f"📝 Transcript: {size_mb:.2f} MB｜{level}"
-        except OSError as exc:
-            if args.strict:
-                raise FileNotFoundError(f"cannot stat sessionFile: {expanded}: {exc}") from exc
+    use_sqlite = getattr(args, "sessions_db", None) or (
+        args.sessions_json is None and Path(DEFAULT_SESSIONS_DB).expanduser().exists()
+    )
+    if use_sqlite:
+        key, entry, size_bytes = read_sqlite_session(
+            getattr(args, "sessions_db", None) or DEFAULT_SESSIONS_DB,
+            args.session_key, args.strict,
+        )
+        transcript_source = "sqlite-event-payload-bytes"
+    else:
+        data = load_sessions(args.sessions_json or DEFAULT_SESSIONS_JSON)
+        key, entry = find_session_entry(data, args.session_key, args.to, args.channel_id, args.allow_latest)
+        session_file = entry.get("sessionFile")
+        transcript_source = "jsonl-file"
+        if session_file:
+            expanded = os.path.expanduser(str(session_file))
+            try:
+                size_bytes = os.stat(expanded).st_size
+            except OSError as exc:
+                if args.strict:
+                    raise FileNotFoundError(f"cannot stat sessionFile: {expanded}: {exc}") from exc
+    if size_bytes is not None:
+        size_mb = size_bytes / (1024 * 1024)
+        level = classify_transcript(size_mb)
+        transcript_line = f"📝 Transcript: {size_mb:.2f} MB｜{level}"
 
     context_tokens, context_limit, token_source, status_meta = resolve_context_tokens(args, entry)
     compactions, compaction_source = resolve_compactions(status_meta, entry)
     status_meta["compactions"] = compactions
     status_meta["compactionSource"] = compaction_source
-    compaction_line = f"🧹 對話壓縮：{compactions} 次"
+    compaction_line = f"🧹 對話壓縮：{compactions if compactions is not None else 'unknown'} 次"
     # Routine context-capacity warnings are intentionally disabled. Native
     # compaction and handoff own continuity; the footer remains informational.
     # Preserve the JSON field for consumers that already parse it.
@@ -414,6 +490,7 @@ def build_payload(args: argparse.Namespace) -> Dict[str, Any]:
     payload = {
         "sessionKey": key,
         "sessionFile": session_file,
+        "transcriptSource": transcript_source if size_bytes is not None else None,
         "sizeBytes": size_bytes,
         "sizeMb": round(size_mb, 2) if size_mb is not None else None,
         "level": level,
@@ -439,7 +516,9 @@ def build_payload(args: argparse.Namespace) -> Dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate an OpenClaw transcript/context footer.")
-    parser.add_argument("--sessions-json", default=DEFAULT_SESSIONS_JSON)
+    stores = parser.add_mutually_exclusive_group()
+    stores.add_argument("--sessions-json", help="Explicit legacy/offline JSON store (no SQLite lookup)")
+    stores.add_argument("--sessions-db", help="Canonical SQLite store (read-only, exact --session-key required)")
     parser.add_argument("--session-key")
     parser.add_argument("--to")
     parser.add_argument("--channel-id")
